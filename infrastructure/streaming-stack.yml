@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Real‑Time Fraud Ingestion Pipeline
+Description: Real‑Time Fraud Ingestion & Processing Pipeline
 
 Parameters:
   Stage:
@@ -7,22 +7,27 @@ Parameters:
     Default: dev
 
 Resources:
+
+  # 1) Raw-data S3 bucket
   RawBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub 'raw-fraud-data-bucket-${Stage}'
+      BucketName: !Sub raw-fraud-data-bucket-${Stage}
 
+  # 2) Kinesis stream
   FraudKinesisStream:
     Type: AWS::Kinesis::Stream
     Properties:
-      Name: !Sub 'fraud-txn-stream-${Stage}'
+      Name: !Sub fraud-txn-stream-${Stage}
       ShardCount: 1
 
+  # 3) IAM role for Firehose
   FirehoseRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub 'firehose-role-${Stage}'
+      RoleName: !Sub firehose-role-${Stage}
       AssumeRolePolicyDocument:
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
@@ -31,6 +36,7 @@ Resources:
       Policies:
         - PolicyName: FirehoseToS3
           PolicyDocument:
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
@@ -46,10 +52,11 @@ Resources:
                   - kinesis:GetRecords
                 Resource: !GetAtt FraudKinesisStream.Arn
 
+  # 4) Firehose delivery from Kinesis → S3/raw-data/
   FraudFirehose:
     Type: AWS::KinesisFirehose::DeliveryStream
     Properties:
-      DeliveryStreamName: !Sub 'fraud-firehose-to-s3-${Stage}'
+      DeliveryStreamName: !Sub fraud-firehose-to-s3-${Stage}
       DeliveryStreamType: KinesisStreamAsSource
       KinesisStreamSourceConfiguration:
         KinesisStreamARN: !GetAtt FraudKinesisStream.Arn
@@ -57,15 +64,88 @@ Resources:
       S3DestinationConfiguration:
         BucketARN: !GetAtt RawBucket.Arn
         RoleARN: !GetAtt FirehoseRole.Arn
-        Prefix: 'raw-data/'
+        Prefix: raw-data/
         BufferingHints:
           SizeInMBs: 5
           IntervalInSeconds: 60
 
+  # 5) Processed‑data S3 bucket
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub processed-fraud-data-bucket-${Stage}
+
+  # 6) IAM role for the processing Lambda
+  ProcessLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub fraud-processor-role-${Stage}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadRawWriteProcessed
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                Resource:
+                  - !GetAtt RawBucket.Arn
+                  - !Sub '${RawBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub '${ProcessedBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  # 7) Processing Lambda
+  ProcessLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub fraud-processor-${Stage}
+      Runtime: python3.9
+      Handler: lambda_function.handler
+      Role: !GetAtt ProcessLambdaRole.Arn
+      Timeout: 60
+      Code:
+        S3Bucket: fraudguardian-code-bucket-dev    # ← update if different
+        S3Key: processor.zip
+
+  # 8) Grant S3 permission to invoke the processing Lambda
+  ProcessLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProcessLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt RawBucket.Arn
+
 Outputs:
-  StreamName:
-    Value: !Ref FraudKinesisStream
-  BucketName:
+  RawBucketName:
+    Description: Name of the raw-data S3 bucket
     Value: !Ref RawBucket
+
+  ProcessedBucketName:
+    Description: Name of the processed-data S3 bucket
+    Value: !Ref ProcessedBucket
+
+  StreamName:
+    Description: Name of the Kinesis stream
+    Value: !Ref FraudKinesisStream
+
   FirehoseName:
+    Description: Name of the Firehose delivery stream
     Value: !Ref FraudFirehose
