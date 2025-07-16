@@ -1,0 +1,4 @@
+# data files
+data/*.csv
+data/merged_train.csv
+data/merged_test.csv
