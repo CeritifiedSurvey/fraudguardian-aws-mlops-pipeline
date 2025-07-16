@@ -1,0 +1,9 @@
+{
+  "LambdaFunctionConfigurations": [
+    {
+      "Id": "RawToProcessed",
+      "LambdaFunctionArn": "",
+      "Events": ["s3:ObjectCreated:*"]
+    }
+  ]
+}
